@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, doc, setDoc, onSnapshot, query, addDoc, serverTimestamp, deleteDoc } from 'firebase/firestore';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { getFirestore, collection, doc, onSnapshot, addDoc, serverTimestamp, deleteDoc, query } from 'firebase/firestore';
 import { 
   Search, ShieldAlert, ShieldCheck, Loader2, Wallet, Users, AlertTriangle, 
   Layers, Repeat, Store, CheckCircle2, Trash2, GitMerge, FileText, 
@@ -10,24 +10,14 @@ import {
 } from 'lucide-react';
 
 // --- Firebase 配置 ---
-// 重要提示：部署後請將此處替換為您在 Firebase Console 獲取的真實 Config
-const firebaseConfig = typeof __firebase_config !== 'undefined' 
-  ? JSON.parse(__firebase_config) 
-  : {
-      apiKey: "", // 填入您的真實 apiKey
-      authDomain: "",
-      projectId: "",
-      storageBucket: "",
-      messagingSenderId: "",
-      appId: ""
-    };
-
+// 使用系統環境提供的配置資訊
+const firebaseConfig = JSON.parse(__firebase_config);
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'merchant-risk-v3-final';
 
-// 生成模擬完整地址
+// 輔助函數：生成模擬完整波場地址 (34字元)
 const generateMockAddress = () => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789';
   let result = 'T';
@@ -49,6 +39,7 @@ export default function App() {
   const [showModal, setShowModal] = useState(false);
   const [modalData, setModalData] = useState(null);
 
+  // 1. 處理身份驗證 (遵循 RULE 3: 先驗證再查詢)
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -57,32 +48,47 @@ export default function App() {
         } else {
           await signInAnonymously(auth);
         }
-      } catch (err) { console.error("Auth Error", err); }
+      } catch (err) {
+        console.error("Auth Error", err);
+      }
     };
     initAuth();
     const unsubscribe = onAuthStateChanged(auth, setUser);
     return () => unsubscribe();
   }, []);
 
+  // 2. 監聽店家資料庫 (遵循 RULE 1 & 2: 使用正確路徑並在 JS 中過濾)
   useEffect(() => {
     if (!user) return;
+    // 使用公共路徑存放店面資料
     const q = collection(db, 'artifacts', appId, 'public', 'data', 'merchants');
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setMerchantWallets(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setMerchantWallets(data);
+    }, (err) => {
+      console.error("Firestore error:", err);
     });
     return () => unsubscribe();
   }, [user]);
 
   const addMerchant = async () => {
-    if (!newMerchantAddr || !newMerchantName) return;
-    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'merchants'), {
-      name: newMerchantName, address: newMerchantAddr.trim(), timestamp: serverTimestamp()
-    });
-    setNewMerchantAddr(''); setNewMerchantName('');
+    if (!user || !newMerchantAddr || !newMerchantName) return;
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'merchants'), {
+        name: newMerchantName,
+        address: newMerchantAddr.trim(),
+        timestamp: serverTimestamp(),
+        createdBy: user.uid
+      });
+      setNewMerchantAddr('');
+      setNewMerchantName('');
+    } catch (e) {
+      console.error("Error adding document: ", e);
+    }
   };
 
   const addBulkMerchants = async () => {
-    if (!bulkInput.trim()) return;
+    if (!user || !bulkInput.trim()) return;
     const lines = bulkInput.split('\n');
     for (const line of lines) {
       const parts = line.split(/[,，\t]/);
@@ -90,17 +96,26 @@ export default function App() {
         const name = parts[0].trim();
         const addr = parts[1].trim();
         if (name && addr.length >= 30) {
-          await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'merchants'), {
-            name, address: addr, timestamp: serverTimestamp()
-          });
+          try {
+            await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'merchants'), {
+              name,
+              address: addr,
+              timestamp: serverTimestamp(),
+              createdBy: user.uid
+            });
+          } catch (e) { console.error(e); }
         }
       }
     }
-    setBulkInput(''); setAddMode('single');
+    setBulkInput('');
+    setAddMode('single');
   };
 
   const deleteMerchant = async (id) => {
-    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'merchants', id));
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'merchants', id));
+    } catch (e) { console.error(e); }
   };
 
   const handleCopy = (text) => {
@@ -118,12 +133,18 @@ export default function App() {
     setFinalReport(null);
   };
 
+  const openDetailModal = (matchData) => {
+    setModalData(matchData);
+    setShowModal(true);
+  };
+
   const runDeepAnalysis = async () => {
     if (!qAddress || merchantWallets.length === 0) return;
     setFinalReport(null);
     setAnalysisStep(1); 
 
     setTimeout(async () => {
+      // 模擬獲取 Q 地址最近流水
       const qLedger = Array.from({length: 10}, (_, i) => {
         const isOut = i % 2 === 0;
         const otherAddr = generateMockAddress();
@@ -140,6 +161,7 @@ export default function App() {
       setTimeout(() => {
         setAnalysisStep(3); 
         setTimeout(() => {
+          // 遍歷所有店家進行碰撞分析
           const allMatches = merchantWallets.map((merchant, index) => {
             const hitType = index % 3; 
             const matchedTx = qLedger[Math.floor(Math.random() * qLedger.length)];
@@ -153,7 +175,6 @@ export default function App() {
               description: hitType === 0 ? `系統發現 Q 曾直接出現在「${merchant.name}」的紅利領取名單。` : `舉報地址 Q 的資金去向，與「${merchant.name}」某位紅利客戶的關連地址高度吻合。`
             };
           });
-
           setFinalReport({ qAddress, qLedger, timestamp: new Date().toLocaleString(), matches: allMatches });
           setAnalysisStep(4);
         }, 2000);
@@ -166,23 +187,24 @@ export default function App() {
       {/* 導航標頭 */}
       <header className="max-w-[1600px] mx-auto mb-10 flex flex-col lg:flex-row justify-between items-center gap-6">
         <div className="flex items-center gap-4">
-          <div className="bg-emerald-600 p-2.5 rounded-2xl shadow-lg"><ShieldAlert className="text-black" size={32} /></div>
+          <div className="bg-emerald-600 p-2.5 rounded-2xl shadow-lg shadow-emerald-500/20"><ShieldAlert className="text-black" size={32} /></div>
           <div>
-            <h1 className="text-2xl font-black text-white italic uppercase tracking-tighter">Cross-Store Risk Audit</h1>
-            <p className="text-[10px] text-emerald-500 uppercase tracking-[0.4em] font-bold">商戶聯動風控審計</p>
+            <h1 className="text-2xl font-black text-white tracking-tighter italic uppercase">Merchant Risk AI</h1>
+            <p className="text-[10px] text-emerald-500 uppercase tracking-[0.4em] font-bold">商戶聯動風控審計系統</p>
           </div>
         </div>
         <nav className="flex bg-slate-900/40 p-1.5 rounded-2xl border border-slate-800 backdrop-blur-2xl">
-          <button onClick={() => setActiveTab('manager')} className={`px-8 py-3 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeTab === 'manager' ? 'bg-emerald-600 text-black' : 'text-slate-500 hover:text-white'}`}><Store size={16} /> 店面錢包管理</button>
-          <button onClick={() => setActiveTab('engine')} className={`px-8 py-3 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeTab === 'engine' ? 'bg-emerald-600 text-black' : 'text-slate-500 hover:text-white'}`}><Repeat size={16} /> AI 比對引擎</button>
+          <button onClick={() => setActiveTab('manager')} className={`px-8 py-3 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeTab === 'manager' ? 'bg-emerald-600 text-black shadow-lg' : 'text-slate-500 hover:text-white'}`}><Store size={16} /> 店面管理</button>
+          <button onClick={() => setActiveTab('engine')} className={`px-8 py-3 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeTab === 'engine' ? 'bg-emerald-600 text-black shadow-lg' : 'text-slate-500 hover:text-white'}`}><Repeat size={16} /> 比對引擎</button>
         </nav>
       </header>
 
       <main className="max-w-[1600px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8">
+        {/* 左側：控制區域 */}
         <div className="lg:col-span-4 space-y-6">
           {activeTab === 'manager' ? (
             <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-6 backdrop-blur-md sticky top-28">
-              <h2 className="text-white font-bold mb-6 flex items-center gap-2 text-sm uppercase tracking-widest"><Store size={18} /> 店面資料管理</h2>
+              <h2 className="text-white font-bold mb-6 flex items-center gap-2 text-sm uppercase tracking-widest"><Store size={18} /> 店面資料錄入</h2>
               <div className="bg-black/40 rounded-lg p-1 flex border border-slate-800 mb-6 w-fit">
                 <button onClick={() => setAddMode('single')} className={`px-4 py-1.5 text-[10px] font-bold rounded ${addMode === 'single' ? 'bg-slate-700 text-white' : 'text-slate-500'}`}>單筆</button>
                 <button onClick={() => setAddMode('bulk')} className={`px-4 py-1.5 text-[10px] font-bold rounded ${addMode === 'bulk' ? 'bg-slate-700 text-white' : 'text-slate-500'}`}>批量</button>
@@ -191,11 +213,11 @@ export default function App() {
                 <div className="space-y-4">
                   <input type="text" value={newMerchantName} onChange={e => setNewMerchantName(e.target.value)} placeholder="店面名稱" className="w-full bg-black/50 border border-slate-800 rounded-xl px-4 py-4 text-sm focus:ring-1 focus:ring-emerald-500 outline-none" />
                   <input type="text" value={newMerchantAddr} onChange={e => setNewMerchantAddr(e.target.value)} placeholder="錢包地址" className="w-full bg-black/50 border border-slate-800 rounded-xl px-4 py-4 text-sm font-mono focus:ring-1 focus:ring-emerald-500 outline-none" />
-                  <button onClick={addMerchant} className="w-full bg-emerald-600 hover:bg-emerald-400 text-black font-black py-4 rounded-xl transition-all uppercase text-xs">儲存並永久同步</button>
+                  <button onClick={addMerchant} className="w-full bg-emerald-600 hover:bg-emerald-500 text-black font-black py-4 rounded-xl transition-all uppercase text-xs">儲存並永久同步</button>
                 </div>
               ) : (
                 <div className="space-y-4">
-                  <textarea rows={8} value={bulkInput} onChange={e => setBulkInput(e.target.value)} placeholder="A店, 地址...&#10;B店, 地址..." className="w-full bg-black/50 border border-slate-800 rounded-xl px-4 py-4 text-xs font-mono focus:ring-1 focus:ring-emerald-500 outline-none resize-none" />
+                  <textarea rows={8} value={bulkInput} onChange={e => setBulkInput(e.target.value)} placeholder="名稱, 地址 (每行一筆)" className="w-full bg-black/50 border border-slate-800 rounded-xl px-4 py-4 text-xs font-mono focus:ring-1 focus:ring-emerald-500 outline-none resize-none" />
                   <button onClick={addBulkMerchants} className="w-full bg-emerald-600 hover:bg-emerald-500 text-black font-black py-4 rounded-xl transition-all uppercase text-xs">執行批量導入</button>
                 </div>
               )}
@@ -207,7 +229,7 @@ export default function App() {
                       <p className="text-xs font-bold text-white mb-1">{m.name}</p>
                       <p className="text-[9px] font-mono text-slate-500 truncate">{m.address}</p>
                     </div>
-                    <button onClick={() => deleteMerchant(m.id)} className="text-slate-700 hover:text-red-500"><Trash2 size={16} /></button>
+                    <button onClick={() => deleteMerchant(m.id)} className="text-slate-700 hover:text-red-500 ml-4"><Trash2 size={16} /></button>
                   </div>
                 ))}
               </div>
@@ -218,7 +240,7 @@ export default function App() {
               <div className="space-y-6">
                 <div className="bg-black/60 p-4 rounded-2xl border border-slate-800">
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 block">舉報者 Q 地址</label>
-                  <input type="text" value={qAddress} onChange={e => setQAddress(e.target.value)} placeholder="貼上 Q 客戶地址..." className="w-full bg-transparent border-none text-sm font-mono text-white focus:outline-none" />
+                  <input type="text" value={qAddress} onChange={e => setQAddress(e.target.value)} placeholder="貼上 Q 地址..." className="w-full bg-transparent border-none text-sm font-mono text-white focus:outline-none" />
                 </div>
                 <button onClick={runDeepAnalysis} disabled={analysisStep > 0 && analysisStep < 4} className="w-full bg-white text-black font-black py-5 rounded-2xl hover:bg-slate-200 transition-all flex items-center justify-center gap-3 shadow-2xl uppercase tracking-widest">啟動多層碰撞比對</button>
               </div>
@@ -227,7 +249,7 @@ export default function App() {
                   {[1,2,3,4].map(s => (
                     <div key={s} className={`flex items-center gap-4 text-[11px] transition-all ${analysisStep >= s ? 'opacity-100' : 'opacity-20'}`}>
                       <div className={`w-5 h-5 rounded-full flex items-center justify-center font-bold text-[9px] ${analysisStep > s ? 'bg-emerald-500 text-black' : 'bg-slate-800 text-slate-500'}`}>{analysisStep > s ? '✓' : s}</div>
-                      <span className="text-slate-400 font-bold uppercase tracking-widest">Processing Step {s}...</span>
+                      <span className="text-slate-400 font-bold uppercase tracking-widest">Step {s} Analysis</span>
                     </div>
                   ))}
                 </div>
@@ -240,31 +262,34 @@ export default function App() {
         <div className="lg:col-span-8">
           {finalReport ? (
             <div className="bg-slate-900/80 border border-slate-800 rounded-[2.5rem] overflow-hidden shadow-2xl animate-in fade-in slide-in-from-bottom-6 duration-700 pb-10">
-              <div className="p-10 bg-gradient-to-br from-[#0c0c0e] to-black border-b border-slate-800">
-                <div className="flex items-center gap-3 mb-4">
-                  <span className="bg-red-500/20 text-red-500 text-[10px] font-black px-4 py-1.5 rounded-full border border-red-500/30 uppercase tracking-[0.2em]">Full Network Scan</span>
-                  <span className="text-slate-600 text-[10px] font-mono uppercase">{finalReport.timestamp}</span>
+              <div className="p-10 bg-gradient-to-br from-[#0c0c0e] to-black border-b border-slate-800 flex justify-between items-start">
+                <div>
+                  <div className="flex items-center gap-3 mb-4">
+                    <span className="bg-red-500/20 text-red-500 text-[10px] font-black px-4 py-1.5 rounded-full border border-red-500/30 uppercase tracking-[0.2em]">Full Network Scan</span>
+                    <span className="text-slate-600 text-[10px] font-mono uppercase">{finalReport.timestamp}</span>
+                  </div>
+                  <h3 className="text-3xl font-black text-white italic tracking-tighter uppercase mb-3 underline decoration-emerald-500/50 underline-offset-8">AI 風控審計報告書</h3>
+                  <div className="flex items-center gap-2 mt-4">
+                    <p className="text-[12px] text-emerald-500 font-mono font-bold break-all select-all tracking-tight">TARGET_Q: {finalReport.qAddress}</p>
+                    <button onClick={() => handleCopy(finalReport.qAddress)} className="text-slate-600 hover:text-white shrink-0"><Copy size={14}/></button>
+                  </div>
                 </div>
-                <h3 className="text-3xl font-black text-white italic tracking-tighter uppercase mb-6 underline decoration-emerald-500/50 underline-offset-8">AI 風控審計報告書</h3>
-                <div className="bg-emerald-500/5 p-4 rounded-xl border border-emerald-500/10 flex items-center justify-between gap-4">
-                  <p className="text-[12px] text-emerald-500 font-mono font-bold break-all flex-1">TARGET_Q: {finalReport.qAddress}</p>
-                  <button onClick={() => handleCopy(finalReport.qAddress)} className="text-slate-600 hover:text-white shrink-0"><Copy size={14}/></button>
-                </div>
+                <div className="bg-emerald-500/10 p-5 rounded-3xl border border-emerald-500/20"><FileText className="text-emerald-500" size={48} /></div>
               </div>
 
               <div className="p-10 space-y-12">
-                {/* 1. Q 流水帳 (修復橫向不換行) */}
+                {/* 1. Q 流水帳 */}
                 <section>
-                  <h4 className="text-[11px] font-bold text-slate-500 uppercase tracking-[0.3em] mb-6 flex items-center gap-2"><Clock size={16} className="text-emerald-500" /> 第一層：客戶 Q 最近資金流水 (LEDGER)</h4>
+                  <h4 className="text-[11px] font-bold text-slate-500 uppercase tracking-[0.3em] mb-6 flex items-center gap-2"><Clock size={16} className="text-emerald-500" /> 第一層：客戶 Q 最近資金流水</h4>
                   <div className="bg-black/40 rounded-3xl border border-slate-800 overflow-hidden shadow-inner">
                     <div className="overflow-x-auto custom-scrollbar">
                       <table className="w-full text-left text-[11px] font-mono min-w-[1000px]">
                         <thead className="bg-white/5 text-slate-500 uppercase border-b border-slate-800 tracking-widest">
                           <tr>
                             <th className="px-6 py-4">時間</th>
-                            <th className="px-6 py-4">FROM (發送方)</th>
+                            <th className="px-6 py-4">FROM</th>
                             <th className="px-6 py-4 text-center">方向</th>
-                            <th className="px-6 py-4">TO (接收方)</th>
+                            <th className="px-6 py-4">TO</th>
                             <th className="px-6 py-4 text-right">金額 (USDT)</th>
                           </tr>
                         </thead>
@@ -286,18 +311,18 @@ export default function App() {
                   </div>
                 </section>
 
-                {/* 2. 碰撞清單 */}
+                {/* 2. 碰撞分析清單 */}
                 <section>
                   <div className="flex items-center justify-between mb-8 px-2">
                     <h4 className="text-[11px] font-bold text-red-500 uppercase tracking-[0.3em] flex items-center gap-2"><AlertTriangle size={16} /> 碰撞命中分析 (COLLISION LIST)</h4>
-                    <span className="bg-red-500 text-black px-4 py-1 rounded-full text-[10px] font-black uppercase shadow-lg shadow-red-500/20">發現 {finalReport.matches.length} 處全網重疊</span>
+                    <span className="bg-red-500 text-black px-4 py-1 rounded-full text-[10px] font-black uppercase">發現 {finalReport.matches.length} 處重疊</span>
                   </div>
                   <div className="space-y-6">
                     {finalReport.matches.map((m, i) => (
                       <div key={i} className="bg-slate-900/60 border border-slate-800 rounded-[2.5rem] p-10 relative overflow-hidden group hover:border-red-500/30 transition-all shadow-xl">
                         <div className="grid grid-cols-1 md:grid-cols-12 gap-8 items-center relative z-10">
-                          <div className="md:col-span-3 border-r border-slate-800/50">
-                            <p className="text-[10px] text-slate-500 font-bold uppercase mb-2 tracking-widest">關聯店家</p>
+                          <div className="md:col-span-3 border-r border-slate-800/50 pr-4">
+                            <p className="text-[10px] text-slate-500 font-bold uppercase mb-2">關聯店家</p>
                             <div className="text-white font-black text-2xl mb-4 italic tracking-tighter uppercase">{m.store}</div>
                             <div className={`text-[9px] font-bold px-3 py-1 rounded-lg border inline-block ${m.riskLevel === 'CRITICAL' ? 'bg-red-500/10 text-red-500 border-red-500/30' : 'bg-orange-500/10 text-orange-400 border-orange-400/30'}`}>{m.matchType}</div>
                           </div>
@@ -315,7 +340,7 @@ export default function App() {
                              </div>
                              <div className="flex justify-end gap-3 mt-4">
                                 <button onClick={() => handleCopy(m.relatedAddr)} className="flex items-center gap-2 text-[10px] font-bold text-slate-500 hover:text-white bg-slate-800/50 px-5 py-3 rounded-xl border border-slate-700 transition-all"><Copy size={14}/> 複製命中地址</button>
-                                <button onClick={() => openDetailModal(m)} className="flex items-center gap-2 text-[10px] font-black text-black bg-emerald-500 hover:bg-emerald-400 px-8 py-3 rounded-xl transition-all shadow-lg shadow-emerald-500/20 uppercase tracking-widest"><Activity size={14}/> 查看證據詳情</button>
+                                <button onClick={() => openDetailModal(m)} className="flex items-center gap-2 text-[10px] font-black text-black bg-emerald-500 hover:bg-emerald-400 px-8 py-3 rounded-xl transition-all shadow-lg uppercase tracking-widest"><Activity size={14}/> 查看證據詳情</button>
                              </div>
                           </div>
                         </div>
@@ -332,13 +357,13 @@ export default function App() {
             <div className="h-full min-h-[750px] flex flex-col items-center justify-center bg-slate-900/20 rounded-[4rem] border-2 border-dashed border-slate-800/50 text-slate-600 p-20 text-center">
                <Repeat size={80} className="opacity-10 text-emerald-500 animate-spin-slow mb-8" />
                <h3 className="text-2xl font-black text-slate-400 tracking-tighter uppercase italic">Awaiting Command</h3>
-               <p className="text-sm mt-4 text-slate-500 max-w-sm italic">請在左側輸入舉報地址。AI 將自動調度店鋪紅利網絡，識別潛在的資金共控群體。</p>
+               <p className="text-sm mt-4 text-slate-500 max-w-sm italic">請在左側輸入舉報地址。AI 將自動掃描所有店鋪紅利網絡，識別潛在的資金共控群體。</p>
             </div>
           )}
         </div>
       </main>
 
-      {/* --- 全螢幕證據彈窗 (橫向強化版) --- */}
+      {/* --- 全螢幕證據彈窗 --- */}
       {showModal && modalData && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-10 animate-in fade-in duration-300">
           <div className="absolute inset-0 bg-black/90 backdrop-blur-md" onClick={() => setShowModal(false)}></div>
@@ -351,27 +376,30 @@ export default function App() {
                   <p className="text-[10px] text-emerald-500 font-bold uppercase tracking-widest mt-1">Store: {modalData.store} · Cross-Chain Verification</p>
                 </div>
               </div>
-              <button onClick={() => setShowModal(false)} className="bg-slate-900 hover:bg-red-500/20 p-3 rounded-2xl text-slate-500 hover:text-red-400 transition-all border border-slate-800"><X size={24} /></button>
+              <button onClick={() => setShowModal(false)} className="bg-slate-900 hover:bg-red-500/20 p-3 rounded-2xl text-slate-500 hover:text-red-400 transition-all border border-slate-800 group"><X size={24} className="group-hover:rotate-90 transition-transform" /></button>
             </div>
             <div className="p-12 overflow-y-auto custom-scrollbar space-y-12">
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                 <div className="bg-black/60 p-8 rounded-[2rem] border border-slate-800 shadow-inner flex flex-col justify-center">
-                  <h5 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2"><Users size={14}/> 原始客戶錢包 (Source Account)</h5>
+                  <h5 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2 tracking-widest"><Users size={14}/> 客戶錢包 (Source Account)</h5>
                   <div className="flex items-center justify-between gap-6 overflow-hidden">
-                    <p className="text-[15px] font-mono text-white whitespace-nowrap overflow-x-auto custom-scrollbar font-bold flex-1 py-2">{modalData.customerWallet}</p>
-                    <button onClick={() => handleCopy(modalData.customerWallet)} className="shrink-0 p-3 bg-slate-900 rounded-xl text-slate-500 hover:text-emerald-400"><Copy size={20}/></button>
+                    <p className="text-[15px] font-mono text-white whitespace-nowrap overflow-x-auto custom-scrollbar font-bold flex-1 py-2 select-all leading-relaxed">{modalData.customerWallet}</p>
+                    <button onClick={() => handleCopy(modalData.customerWallet)} className="shrink-0 p-3 bg-slate-900 rounded-xl text-slate-500 hover:text-emerald-400 transition-colors"><Copy size={20}/></button>
                   </div>
                 </div>
                 <div className="bg-red-500/5 p-8 rounded-[2rem] border border-red-500/20 shadow-xl flex flex-col justify-center">
-                  <h5 className="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-4 flex items-center gap-2"><Link2 size={14}/> 碰撞命中點 (Collision Point)</h5>
+                  <h5 className="text-[10px] font-bold text-red-400 uppercase mb-4 flex items-center gap-2 tracking-widest"><Link2 size={14}/> 碰撞命中點 (Collision Point)</h5>
                   <div className="flex items-center justify-between gap-6 overflow-hidden">
-                    <p className="text-[15px] font-mono text-red-400 whitespace-nowrap overflow-x-auto custom-scrollbar font-black flex-1 py-2">{modalData.relatedAddr}</p>
-                    <button onClick={() => handleCopy(modalData.relatedAddr)} className="shrink-0 p-3 bg-red-900/20 rounded-xl text-red-400 hover:text-white"><Copy size={20}/></button>
+                    <p className="text-[15px] font-mono text-red-400 whitespace-nowrap overflow-x-auto custom-scrollbar font-black flex-1 py-2 select-all leading-relaxed">{modalData.relatedAddr}</p>
+                    <button onClick={() => handleCopy(modalData.relatedAddr)} className="shrink-0 p-3 bg-red-900/20 rounded-xl text-red-400 hover:text-white transition-colors"><Copy size={20}/></button>
                   </div>
                 </div>
               </div>
               <section>
-                <div className="flex items-center gap-3 mb-6 px-2"><FileText className="text-emerald-500" size={20} /><h5 className="text-[12px] font-bold text-white uppercase tracking-widest underline decoration-emerald-500/20 underline-offset-8">證據：鏈上轉帳流水 (ON-CHAIN EVIDENCE)</h5></div>
+                <div className="flex items-center gap-3 mb-6 px-2 tracking-widest">
+                  <FileText className="text-emerald-500" size={20} />
+                  <h5 className="text-[12px] font-bold text-white uppercase underline underline-offset-8 decoration-emerald-500/20">證據：鏈上轉帳流水 (ON-CHAIN EVIDENCE)</h5>
+                </div>
                 <div className="bg-black/60 rounded-[2.5rem] border border-slate-800 overflow-x-auto shadow-2xl custom-scrollbar">
                   <table className="w-full text-left text-[13px] font-mono border-collapse min-w-[1200px]">
                     <thead className="bg-white/5 text-slate-500 uppercase tracking-widest border-b border-slate-800">
@@ -384,7 +412,7 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/50">
-                      <tr className="bg-emerald-500/10">
+                      <tr className="bg-emerald-500/10 transition-colors">
                         <td className="px-10 py-8 text-slate-400 whitespace-nowrap font-bold">{modalData.matchedTx.time}</td>
                         <td className="px-10 py-8 whitespace-nowrap text-slate-300 font-bold select-all">{modalData.matchedTx.from}</td>
                         <td className="px-6 py-8 text-center">
@@ -402,8 +430,8 @@ export default function App() {
                 <p className="text-[15px] text-slate-400 leading-loose font-medium max-w-5xl">{modalData.description} 基於鏈上數據時間軸與金額的高匹配度，判定舉報者與該店客戶為資金共同控制實體。建議採取風控阻斷。</p>
               </div>
             </div>
-            <div className="p-8 border-t border-slate-800 bg-slate-900/40 flex justify-end">
-              <button onClick={() => setShowModal(false)} className="px-12 py-4 bg-white text-black font-black rounded-2xl hover:bg-slate-200 transition-all uppercase text-xs tracking-widest shadow-[0_0_40px_rgba(255,255,255,0.1)]">關閉視窗</button>
+            <div className="p-8 border-t border-slate-800 bg-slate-900/40 flex justify-end px-12">
+              <button onClick={() => setShowModal(false)} className="px-12 py-4 bg-white text-black font-black rounded-2xl hover:bg-slate-200 transition-all uppercase text-xs tracking-widest shadow-xl">關閉並返回報告</button>
             </div>
           </div>
         </div>
