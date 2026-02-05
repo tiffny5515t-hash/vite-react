@@ -10,14 +10,25 @@ import {
 } from 'lucide-react';
 
 // --- Firebase 配置 ---
-// 使用系統環境提供的配置資訊
-const firebaseConfig = JSON.parse(__firebase_config);
+// 此處邏輯會自動偵測環境。如果在 Vercel 部署，請確保在 firebaseConfig 物件內填入您的真實金鑰。
+const firebaseConfig = typeof __firebase_config !== 'undefined'
+  ? JSON.parse(__firebase_config)
+  : {
+      apiKey: "您的_API_KEY_請在此填入", 
+      authDomain: "您的_AUTH_DOMAIN_請在此填入",
+      projectId: "您的_PROJECT_ID_請在此填入",
+      storageBucket: "您的_STORAGE_BUCKET_請在此填入",
+      messagingSenderId: "您的_SENDER_ID_請在此填入",
+      appId: "您的_APP_ID_請在此填入"
+    };
+
+// 初始化 Firebase
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'merchant-risk-v3-final';
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'merchant-risk-audit-v1';
 
-// 輔助函數：生成模擬完整波場地址 (34字元)
+// 輔助函數：生成模擬完整地址 (34字元)
 const generateMockAddress = () => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789';
   let result = 'T';
@@ -39,7 +50,7 @@ export default function App() {
   const [showModal, setShowModal] = useState(false);
   const [modalData, setModalData] = useState(null);
 
-  // 1. 處理身份驗證 (遵循 RULE 3: 先驗證再查詢)
+  // 1. 處理身份驗證 (確保先認證再操作資料庫)
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -48,8 +59,8 @@ export default function App() {
         } else {
           await signInAnonymously(auth);
         }
-      } catch (err) {
-        console.error("Auth Error", err);
+      } catch (err) { 
+        console.error("Auth Error", err); 
       }
     };
     initAuth();
@@ -57,34 +68,27 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // 2. 監聽店家資料庫 (遵循 RULE 1 & 2: 使用正確路徑並在 JS 中過濾)
+  // 2. 監聽店家資料庫 (使用規則要求的路徑結構)
   useEffect(() => {
     if (!user) return;
-    // 使用公共路徑存放店面資料
     const q = collection(db, 'artifacts', appId, 'public', 'data', 'merchants');
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setMerchantWallets(data);
+      setMerchantWallets(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     }, (err) => {
-      console.error("Firestore error:", err);
+      console.error("Firestore Error:", err);
     });
     return () => unsubscribe();
-  }, [user]);
+  }, [user, appId]);
 
   const addMerchant = async () => {
     if (!user || !newMerchantAddr || !newMerchantName) return;
-    try {
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'merchants'), {
-        name: newMerchantName,
-        address: newMerchantAddr.trim(),
-        timestamp: serverTimestamp(),
-        createdBy: user.uid
-      });
-      setNewMerchantAddr('');
-      setNewMerchantName('');
-    } catch (e) {
-      console.error("Error adding document: ", e);
-    }
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'merchants'), {
+      name: newMerchantName,
+      address: newMerchantAddr.trim(),
+      timestamp: serverTimestamp(),
+      userId: user.uid
+    });
+    setNewMerchantAddr(''); setNewMerchantName('');
   };
 
   const addBulkMerchants = async () => {
@@ -96,26 +100,18 @@ export default function App() {
         const name = parts[0].trim();
         const addr = parts[1].trim();
         if (name && addr.length >= 30) {
-          try {
-            await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'merchants'), {
-              name,
-              address: addr,
-              timestamp: serverTimestamp(),
-              createdBy: user.uid
-            });
-          } catch (e) { console.error(e); }
+          await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'merchants'), {
+            name, address: addr, timestamp: serverTimestamp(), userId: user.uid
+          });
         }
       }
     }
-    setBulkInput('');
-    setAddMode('single');
+    setBulkInput(''); setAddMode('single');
   };
 
   const deleteMerchant = async (id) => {
     if (!user) return;
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'merchants', id));
-    } catch (e) { console.error(e); }
+    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'merchants', id));
   };
 
   const handleCopy = (text) => {
@@ -144,7 +140,6 @@ export default function App() {
     setAnalysisStep(1); 
 
     setTimeout(async () => {
-      // 模擬獲取 Q 地址最近流水
       const qLedger = Array.from({length: 10}, (_, i) => {
         const isOut = i % 2 === 0;
         const otherAddr = generateMockAddress();
@@ -161,7 +156,6 @@ export default function App() {
       setTimeout(() => {
         setAnalysisStep(3); 
         setTimeout(() => {
-          // 遍歷所有店家進行碰撞分析
           const allMatches = merchantWallets.map((merchant, index) => {
             const hitType = index % 3; 
             const matchedTx = qLedger[Math.floor(Math.random() * qLedger.length)];
@@ -187,9 +181,9 @@ export default function App() {
       {/* 導航標頭 */}
       <header className="max-w-[1600px] mx-auto mb-10 flex flex-col lg:flex-row justify-between items-center gap-6">
         <div className="flex items-center gap-4">
-          <div className="bg-emerald-600 p-2.5 rounded-2xl shadow-lg shadow-emerald-500/20"><ShieldAlert className="text-black" size={32} /></div>
+          <div className="bg-emerald-600 p-2.5 rounded-2xl shadow-lg"><ShieldAlert className="text-black" size={32} /></div>
           <div>
-            <h1 className="text-2xl font-black text-white tracking-tighter italic uppercase">Merchant Risk AI</h1>
+            <h1 className="text-2xl font-black text-white italic uppercase tracking-tighter">Merchant Risk AI</h1>
             <p className="text-[10px] text-emerald-500 uppercase tracking-[0.4em] font-bold">商戶聯動風控審計系統</p>
           </div>
         </div>
@@ -204,7 +198,7 @@ export default function App() {
         <div className="lg:col-span-4 space-y-6">
           {activeTab === 'manager' ? (
             <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-6 backdrop-blur-md sticky top-28">
-              <h2 className="text-white font-bold mb-6 flex items-center gap-2 text-sm uppercase tracking-widest"><Store size={18} /> 店面資料錄入</h2>
+              <h2 className="text-white font-bold mb-6 flex items-center gap-2 text-sm uppercase tracking-widest"><Store size={18} /> 店面資料管理</h2>
               <div className="bg-black/40 rounded-lg p-1 flex border border-slate-800 mb-6 w-fit">
                 <button onClick={() => setAddMode('single')} className={`px-4 py-1.5 text-[10px] font-bold rounded ${addMode === 'single' ? 'bg-slate-700 text-white' : 'text-slate-500'}`}>單筆</button>
                 <button onClick={() => setAddMode('bulk')} className={`px-4 py-1.5 text-[10px] font-bold rounded ${addMode === 'bulk' ? 'bg-slate-700 text-white' : 'text-slate-500'}`}>批量</button>
@@ -213,7 +207,7 @@ export default function App() {
                 <div className="space-y-4">
                   <input type="text" value={newMerchantName} onChange={e => setNewMerchantName(e.target.value)} placeholder="店面名稱" className="w-full bg-black/50 border border-slate-800 rounded-xl px-4 py-4 text-sm focus:ring-1 focus:ring-emerald-500 outline-none" />
                   <input type="text" value={newMerchantAddr} onChange={e => setNewMerchantAddr(e.target.value)} placeholder="錢包地址" className="w-full bg-black/50 border border-slate-800 rounded-xl px-4 py-4 text-sm font-mono focus:ring-1 focus:ring-emerald-500 outline-none" />
-                  <button onClick={addMerchant} className="w-full bg-emerald-600 hover:bg-emerald-500 text-black font-black py-4 rounded-xl transition-all uppercase text-xs">儲存並永久同步</button>
+                  <button onClick={addMerchant} className="w-full bg-emerald-600 hover:bg-emerald-400 text-black font-black py-4 rounded-xl transition-all uppercase text-xs">儲存並永久同步</button>
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -238,10 +232,7 @@ export default function App() {
             <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8 backdrop-blur-md sticky top-28 shadow-2xl">
               <h2 className="text-white font-bold mb-8 flex items-center gap-2 text-red-500 uppercase italic tracking-widest"><ShieldAlert size={20} /> 啟動風控審計</h2>
               <div className="space-y-6">
-                <div className="bg-black/60 p-4 rounded-2xl border border-slate-800">
-                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 block">舉報者 Q 地址</label>
-                  <input type="text" value={qAddress} onChange={e => setQAddress(e.target.value)} placeholder="貼上 Q 地址..." className="w-full bg-transparent border-none text-sm font-mono text-white focus:outline-none" />
-                </div>
+                <input type="text" value={qAddress} onChange={e => setQAddress(e.target.value)} placeholder="貼上 Q 客戶地址..." className="w-full bg-black border border-slate-800 rounded-2xl px-5 py-5 text-sm font-mono text-white focus:ring-1 focus:ring-emerald-500 outline-none shadow-inner" />
                 <button onClick={runDeepAnalysis} disabled={analysisStep > 0 && analysisStep < 4} className="w-full bg-white text-black font-black py-5 rounded-2xl hover:bg-slate-200 transition-all flex items-center justify-center gap-3 shadow-2xl uppercase tracking-widest">啟動多層碰撞比對</button>
               </div>
               {analysisStep > 0 && (
@@ -262,19 +253,16 @@ export default function App() {
         <div className="lg:col-span-8">
           {finalReport ? (
             <div className="bg-slate-900/80 border border-slate-800 rounded-[2.5rem] overflow-hidden shadow-2xl animate-in fade-in slide-in-from-bottom-6 duration-700 pb-10">
-              <div className="p-10 bg-gradient-to-br from-[#0c0c0e] to-black border-b border-slate-800 flex justify-between items-start">
-                <div>
-                  <div className="flex items-center gap-3 mb-4">
-                    <span className="bg-red-500/20 text-red-500 text-[10px] font-black px-4 py-1.5 rounded-full border border-red-500/30 uppercase tracking-[0.2em]">Full Network Scan</span>
-                    <span className="text-slate-600 text-[10px] font-mono uppercase">{finalReport.timestamp}</span>
-                  </div>
-                  <h3 className="text-3xl font-black text-white italic tracking-tighter uppercase mb-3 underline decoration-emerald-500/50 underline-offset-8">AI 風控審計報告書</h3>
-                  <div className="flex items-center gap-2 mt-4">
-                    <p className="text-[12px] text-emerald-500 font-mono font-bold break-all select-all tracking-tight">TARGET_Q: {finalReport.qAddress}</p>
-                    <button onClick={() => handleCopy(finalReport.qAddress)} className="text-slate-600 hover:text-white shrink-0"><Copy size={14}/></button>
-                  </div>
+              <div className="p-10 bg-gradient-to-br from-[#0c0c0e] to-black border-b border-slate-800">
+                <div className="flex items-center gap-3 mb-4">
+                  <span className="bg-red-500/20 text-red-500 text-[10px] font-black px-4 py-1.5 rounded-full border border-red-500/30 uppercase tracking-[0.2em]">Full Network Scan</span>
+                  <span className="text-slate-600 text-[10px] font-mono uppercase">{finalReport.timestamp}</span>
                 </div>
-                <div className="bg-emerald-500/10 p-5 rounded-3xl border border-emerald-500/20"><FileText className="text-emerald-500" size={48} /></div>
+                <h3 className="text-3xl font-black text-white italic tracking-tighter uppercase mb-6 underline decoration-emerald-500/50 underline-offset-8">AI 風控審計報告書</h3>
+                <div className="bg-emerald-500/5 p-4 rounded-xl border border-emerald-500/10 flex items-center justify-between gap-4">
+                  <p className="text-[12px] text-emerald-500 font-mono font-bold break-all flex-1">TARGET_Q: {finalReport.qAddress}</p>
+                  <button onClick={() => handleCopy(finalReport.qAddress)} className="text-slate-600 hover:text-white shrink-0"><Copy size={14}/></button>
+                </div>
               </div>
 
               <div className="p-10 space-y-12">
@@ -311,11 +299,11 @@ export default function App() {
                   </div>
                 </section>
 
-                {/* 2. 碰撞分析清單 */}
+                {/* 2. 碰撞清單 */}
                 <section>
-                  <div className="flex items-center justify-between mb-8 px-2">
-                    <h4 className="text-[11px] font-bold text-red-500 uppercase tracking-[0.3em] flex items-center gap-2"><AlertTriangle size={16} /> 碰撞命中分析 (COLLISION LIST)</h4>
-                    <span className="bg-red-500 text-black px-4 py-1 rounded-full text-[10px] font-black uppercase">發現 {finalReport.matches.length} 處重疊</span>
+                  <div className="flex items-center justify-between mb-8 px-2 tracking-widest">
+                    <h4 className="text-[11px] font-bold text-red-500 uppercase flex items-center gap-2"><AlertTriangle size={16} /> 碰撞命中分析 (MATCHING LIST)</h4>
+                    <span className="bg-red-500 text-black px-4 py-1 rounded-full text-[10px] font-black uppercase shadow-lg">發現 {finalReport.matches.length} 處重疊</span>
                   </div>
                   <div className="space-y-6">
                     {finalReport.matches.map((m, i) => (
@@ -329,18 +317,18 @@ export default function App() {
                           <div className="md:col-span-9 space-y-6">
                              <div className="flex flex-col lg:flex-row items-center gap-6">
                                 <div className="flex-1 w-full overflow-hidden">
-                                  <p className="text-[10px] text-slate-500 uppercase font-bold mb-2">客戶錢包 (紅利領取者)</p>
+                                  <p className="text-[10px] text-slate-500 uppercase font-bold mb-2 tracking-widest">客戶錢包 (領取者)</p>
                                   <p className="text-[12px] font-mono text-white whitespace-nowrap overflow-x-auto custom-scrollbar bg-black/40 p-4 rounded-xl border border-slate-800 font-bold select-all shadow-inner">{m.customerWallet}</p>
                                 </div>
                                 <ArrowRightLeft className="text-slate-800 hidden lg:block" size={24} />
                                 <div className="flex-1 w-full overflow-hidden">
-                                  <p className="text-[10px] text-red-400 uppercase font-bold mb-2">碰撞關連地址 (命中點)</p>
+                                  <p className="text-[10px] text-red-400 uppercase font-bold mb-2 tracking-widest">碰撞命中點 (命中地址)</p>
                                   <p className="text-[12px] font-mono text-red-400 whitespace-nowrap overflow-x-auto custom-scrollbar bg-red-500/5 p-4 rounded-xl border border-red-500/20 shadow-lg font-bold select-all">{m.relatedAddr}</p>
                                 </div>
                              </div>
                              <div className="flex justify-end gap-3 mt-4">
-                                <button onClick={() => handleCopy(m.relatedAddr)} className="flex items-center gap-2 text-[10px] font-bold text-slate-500 hover:text-white bg-slate-800/50 px-5 py-3 rounded-xl border border-slate-700 transition-all"><Copy size={14}/> 複製命中地址</button>
-                                <button onClick={() => openDetailModal(m)} className="flex items-center gap-2 text-[10px] font-black text-black bg-emerald-500 hover:bg-emerald-400 px-8 py-3 rounded-xl transition-all shadow-lg uppercase tracking-widest"><Activity size={14}/> 查看證據詳情</button>
+                                <button onClick={() => handleCopy(m.relatedAddr)} className="flex items-center gap-2 text-[10px] font-bold text-slate-500 hover:text-white bg-slate-800/50 px-5 py-3 rounded-xl border border-slate-700 transition-all"><Copy size={14}/> 複製</button>
+                                <button onClick={() => openDetailModal(m)} className="flex items-center gap-2 text-[10px] font-black text-black bg-emerald-500 hover:bg-emerald-400 px-8 py-3 rounded-xl transition-all shadow-lg uppercase tracking-widest"><Activity size={14}/> 查看證據</button>
                              </div>
                           </div>
                         </div>
@@ -349,7 +337,7 @@ export default function App() {
                   </div>
                 </section>
                 <div className="pt-10 border-t border-slate-800 flex justify-center">
-                  <button onClick={resetAnalysis} className="flex items-center gap-3 text-xs font-bold text-slate-500 hover:text-white transition-all uppercase bg-slate-900/50 px-12 py-4 rounded-full border border-slate-800 hover:border-emerald-500/50 shadow-lg"><Repeat size={16} /> 啟動全新比對任務</button>
+                  <button onClick={resetAnalysis} className="flex items-center gap-3 text-xs font-bold text-slate-500 hover:text-white transition-all uppercase bg-slate-900/50 px-12 py-4 rounded-full border border-slate-800 hover:border-emerald-500/50"><Repeat size={16} /> 啟動全新比對任務</button>
                 </div>
               </div>
             </div>
@@ -363,12 +351,12 @@ export default function App() {
         </div>
       </main>
 
-      {/* --- 全螢幕證據彈窗 --- */}
+      {/* --- 全螢幕證據彈窗 (橫向強化版) --- */}
       {showModal && modalData && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-10 animate-in fade-in duration-300">
           <div className="absolute inset-0 bg-black/90 backdrop-blur-md" onClick={() => setShowModal(false)}></div>
           <div className="relative w-full max-w-7xl bg-[#0c0c0e] border border-emerald-500/30 rounded-[3rem] shadow-2xl overflow-hidden flex flex-col max-h-full">
-            <div className="p-8 border-b border-slate-800 flex justify-between items-center bg-gradient-to-r from-emerald-950/20 to-transparent">
+            <div className="p-8 border-b border-slate-800 flex justify-between items-center bg-gradient-to-r from-emerald-950/20 to-transparent px-12">
               <div className="flex items-center gap-5">
                 <div className="bg-emerald-500 p-3 rounded-2xl shadow-lg"><Activity className="text-black" size={28} /></div>
                 <div>
@@ -425,7 +413,7 @@ export default function App() {
                   </table>
                 </div>
               </section>
-              <div className="bg-emerald-500/5 p-10 rounded-[3rem] border border-emerald-500/20 shadow-inner">
+              <div className="bg-emerald-500/5 p-10 rounded-[3rem] border border-emerald-500/20 shadow-inner px-12">
                 <div className="flex items-center gap-4 mb-5"><CheckCircle2 size={28} className="text-emerald-500" /><h5 className="text-xl font-black text-white italic uppercase tracking-tighter underline decoration-emerald-500/30 underline-offset-4">AI 審計診斷結論</h5></div>
                 <p className="text-[15px] text-slate-400 leading-loose font-medium max-w-5xl">{modalData.description} 基於鏈上數據時間軸與金額的高匹配度，判定舉報者與該店客戶為資金共同控制實體。建議採取風控阻斷。</p>
               </div>
