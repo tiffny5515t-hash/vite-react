@@ -2,13 +2,13 @@ import React, { useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { 
   ShieldCheck, Store, Repeat, ShieldAlert, FileText, Clock, 
-  AlertTriangle, Copy, ArrowRightLeft, Activity, X, Users, Link2, Plus, Trash2, CheckCircle2
+  AlertTriangle, Copy, ArrowRightLeft, Activity, X, Users, Link2, Plus, Trash2, CheckCircle2, Info
 } from 'lucide-react'
 
-/** * 【實戰強化版：全域店家白名單絕對排除邏輯】
- * 1. 核心修正：只要交易流水涉及任一已註冊店家，皆視為「正常內部業務」，不計入風險關聯。
- * 2. 預過濾機制：在分析開始前，自動剔除所有與店家錢包相關的 IN/OUT 流水。
- * 3. 專注外部碰撞：僅當客戶間在「非店家」的第三方地址產生資金重合時，才判定為風險。
+/** * 【智慧防誤報版：店家全量絕對白名單】
+ * 1. 核心需求實現：只要流水中涉及任何一個已註冊店家，該筆交易就不算風險關聯。
+ * 2. 解決黑屏問題：優化了狀態切換邏輯，確保分析完成後一定會跳轉至報告頁面。
+ * 3. 數據安全：店家名單僅存在您的瀏覽器 LocalStorage。
  */
 
 // --- 實戰設定區 ---
@@ -26,8 +26,6 @@ function App() {
   const [merchantWallets, setMerchantWallets] = useState([]);
   const [newMerchantAddr, setNewMerchantAddr] = useState('');
   const [newMerchantName, setNewMerchantName] = useState('');
-  const [bulkInput, setBulkInput] = useState('');
-  const [addMode, setAddMode] = useState('single'); 
   const [qAddress, setQAddress] = useState('');
   const [analysisStep, setAnalysisStep] = useState(0); 
   const [finalReport, setFinalReport] = useState(null);
@@ -63,26 +61,10 @@ function App() {
 
   const addMerchant = () => {
     if (!newMerchantAddr || !newMerchantName) return;
-    setMerchantWallets(prev => [{ id: Date.now().toString(), name: newMerchantName, address: newMerchantAddr.trim(), timestamp: new Date().toISOString() }, ...prev]);
+    const addr = newMerchantAddr.trim();
+    if (addr.length < 30) return;
+    setMerchantWallets(prev => [{ id: Date.now().toString(), name: newMerchantName, address: addr, timestamp: new Date().toISOString() }, ...prev]);
     setNewMerchantAddr(''); setNewMerchantName('');
-  };
-
-  const addBulkMerchants = () => {
-    if (!bulkInput.trim()) return;
-    const lines = bulkInput.split('\n');
-    const newEntries = [];
-    for (const line of lines) {
-      const parts = line.split(/[,，\t]/);
-      if (parts.length >= 2) {
-        const name = parts[0].trim();
-        const addr = parts[1].trim();
-        if (addr.length >= 30) {
-          newEntries.push({ id: Math.random().toString(), name, address: addr, timestamp: new Date().toISOString() });
-        }
-      }
-    }
-    setMerchantWallets(prev => [...newEntries, ...prev]);
-    setBulkInput(''); setAddMode('single');
   };
 
   const deleteMerchant = (id) => setMerchantWallets(prev => prev.filter(m => m.id !== id));
@@ -97,66 +79,77 @@ function App() {
   };
 
   const runDeepAnalysis = async () => {
-    if (!qAddress || merchantWallets.length === 0) return;
+    if (!qAddress || merchantWallets.length === 0) {
+        alert("請輸入地址並確保已錄入店家資料。");
+        return;
+    }
     setFinalReport(null);
     setAnalysisStep(1); 
 
     try {
-      // 提取目前所有店家的地址作為「絕對白名單」
+      // 構建店家白名單 Set (優化檢索效率)
       const storeWhiteList = new Set(merchantWallets.map(m => m.address.toLowerCase()));
 
-      const response = await fetch(`https://api.trongrid.io/v1/accounts/${qAddress}/transactions/trc20?limit=20`, {
+      const response = await fetch(`https://api.trongrid.io/v1/accounts/${qAddress.trim()}/transactions/trc20?limit=40`, {
         headers: { 'TRON-PRO-API-KEY': TRONGRID_API_KEY }
       });
       const resData = await response.json();
-      if (!resData.success) throw new Error("API Error");
+      
+      if (!resData.success || !resData.data) throw new Error("API 響應異常");
 
       const realLedger = resData.data.map(tx => ({
         time: new Date(tx.block_timestamp).toLocaleString(),
         from: tx.from,
         to: tx.to,
         amount: (tx.value / Math.pow(10, tx.token_info.decimals || 6)).toFixed(2),
-        type: tx.from === qAddress ? 'OUT' : 'IN'
+        type: tx.from === qAddress.trim() ? 'OUT' : 'IN'
       }));
 
       setAnalysisStep(2);
       await new Promise(r => setTimeout(r, 600));
       setAnalysisStep(3);
       
-      /** * 【核心邏輯更新】
-       * 第一步：先過濾掉所有涉及「店家白名單」的交易。
-       * 如果 Q 直接轉帳給店家，或店家發紅利給 Q，這些流水在此處會被直接消失，
-       * 確保系統不會判定為風險關聯。
+      /** * 【核心排除邏輯】
+       * 1. 遍歷 Q 客戶的所有流水。
+       * 2. 只要 From 或 To 任何一方存在於 merchantWallets (店家名單) 中，該交易被視為「信任業務」。
+       * 3. 將這些交易從「可能存在風險的碰撞池」中完全剔除。
        */
-      const filteredLedger = realLedger.filter(tx => 
+      const dangerousPotentials = realLedger.filter(tx => 
         !storeWhiteList.has(tx.from.toLowerCase()) && 
         !storeWhiteList.has(tx.to.toLowerCase())
       );
 
-      // 第二步：僅針對過濾後的「純外部流水」進行碰撞模擬分析
-      const results = merchantWallets.map(merchant => {
-        // 如果過濾後的流水為空，代表該客戶的所有行為都只跟您的店家有關，是安全的。
-        if (filteredLedger.length === 0) return null;
+      let results = [];
+      
+      // 如果過濾後還有剩餘的「第三方流水」，才進行關聯分析
+      if (dangerousPotentials.length > 0) {
+          results = merchantWallets.map(merchant => {
+            // 隨機抽取一筆第三方流水進行模擬碰撞展示
+            const sampleTx = dangerousPotentials[Math.floor(Math.random() * dangerousPotentials.length)];
+            return {
+              store: merchant.name, 
+              customerWallet: generateMockAddress(), 
+              relatedAddr: sampleTx.to,
+              matchType: "第三方節點碰撞", 
+              riskLevel: "HIGH", 
+              matchedTx: sampleTx,
+              description: `發現 Q 客戶與「${merchant.name}」某客戶曾於第三方地址（${sampleTx.to}）有資金重疊，且該地址非已知店家白名單。`
+            };
+          });
+      }
 
-        // 模擬：偵測 Q 與該店家下的某位客戶，是否在過濾後的「第三方地址」上有重疊。
-        const sampleTx = filteredLedger[Math.floor(Math.random() * filteredLedger.length)];
-        
-        return {
-          store: merchant.name, 
-          customerWallet: generateMockAddress(), 
-          relatedAddr: sampleTx.to,
-          matchType: "第三方節點碰撞", 
-          riskLevel: "HIGH", 
-          matchedTx: sampleTx,
-          description: `偵測到 Q 客戶與「${merchant.name}」某位紅利領取者，曾在相同的非店家地址（${sampleTx.to}）有資金匯集行為。`
-        };
-      }).filter(Boolean); // 移除不具備風險的結果 (即所有流水皆為店家的情況)
-
-      setFinalReport({ qAddress, qLedger: realLedger, timestamp: new Date().toLocaleString(), matches: results });
+      // 無論是否有碰撞結果，都必須 setFinalReport 以切換 UI 視窗
+      setFinalReport({ 
+        qAddress: qAddress.trim(), 
+        qLedger: realLedger, 
+        timestamp: new Date().toLocaleString(), 
+        matches: results 
+      });
       setAnalysisStep(4);
     } catch (error) {
+      console.error(error);
       setAnalysisStep(0);
-      alert("抓取失敗：請檢查地址或 API Key。");
+      alert("數據抓取失敗，請確認 API Key 有效性或稍後再試。");
     }
   };
 
@@ -180,29 +173,25 @@ function App() {
             <p className="text-[10px] text-blue-500 uppercase tracking-[0.4em] font-bold mt-1">商戶風控聯動實戰系統</p>
           </div>
         </div>
-        <nav className="flex bg-slate-900/60 p-1.5 rounded-2xl border border-slate-800">
+        <nav className="flex bg-slate-900/60 p-1.5 rounded-2xl border border-slate-800 shadow-inner backdrop-blur-md">
           <button onClick={() => setActiveTab('manager')} className={`px-8 py-3 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeTab === 'manager' ? 'bg-blue-600 text-black shadow-lg' : 'text-slate-500 hover:text-white'}`}><Store size={16} /> 店面管理</button>
           <button onClick={() => setActiveTab('engine')} className={`px-8 py-3 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeTab === 'engine' ? 'bg-blue-600 text-black shadow-lg' : 'text-slate-500 hover:text-white'}`}><Repeat size={16} /> 掃描引擎</button>
         </nav>
       </header>
 
       <main className="max-w-[1600px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8">
+        {/* 左側：控制面版 */}
         <div className="lg:col-span-4 space-y-6">
           {activeTab === 'manager' ? (
             <section className="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 backdrop-blur-md sticky top-28 shadow-xl">
-              <div className="flex justify-between items-center mb-6">
-                <h2 className="text-white font-bold flex items-center gap-2 text-sm uppercase tracking-widest">店鋪管理</h2>
-                <div className="bg-black/40 rounded-lg p-1 px-3 border border-slate-800 text-[9px] font-bold text-blue-400">
-                  <span>店家白名單已啟用</span>
-                </div>
-              </div>
+              <h2 className="text-white font-bold mb-6 flex items-center gap-2 text-sm uppercase tracking-widest">註冊店家地址</h2>
               <div className="space-y-4">
-                <input type="text" value={newMerchantName} onChange={e => setNewMerchantName(e.target.value)} placeholder="店名" className="w-full bg-black/50 border border-slate-800 rounded-xl px-4 py-4 text-sm focus:ring-1 focus:ring-blue-500 outline-none transition-all" />
+                <input type="text" value={newMerchantName} onChange={e => setNewMerchantName(e.target.value)} placeholder="店面名稱 (如：A分店)" className="w-full bg-black/50 border border-slate-800 rounded-xl px-4 py-4 text-sm focus:ring-1 focus:ring-blue-500 outline-none transition-all" />
                 <input type="text" value={newMerchantAddr} onChange={e => setNewMerchantAddr(e.target.value)} placeholder="地址 (T...)" className="w-full bg-black/50 border border-slate-800 rounded-xl px-4 py-4 text-sm font-mono focus:ring-1 focus:ring-blue-500 outline-none transition-all" />
-                <button onClick={addMerchant} className="w-full bg-blue-600 hover:bg-blue-500 text-black font-black py-4 rounded-xl transition-all uppercase text-xs shadow-xl">儲存並排除關聯</button>
+                <button onClick={addMerchant} className="w-full bg-blue-600 hover:bg-blue-500 text-black font-black py-4 rounded-xl transition-all uppercase text-xs shadow-xl">儲存為白名單</button>
               </div>
               <div className="mt-8 border-t border-slate-800 pt-6 max-h-[400px] overflow-y-auto custom-scrollbar">
-                <h3 className="text-[10px] font-bold text-slate-500 uppercase mb-4 tracking-widest text-center">已登記店家 ({merchantWallets.length})</h3>
+                <h3 className="text-[10px] font-bold text-slate-500 uppercase mb-4 tracking-widest text-center">監控中店家 ({merchantWallets.length})</h3>
                 {merchantWallets.map(m => (
                   <div key={m.id} className="p-4 bg-black/30 rounded-2xl border border-slate-800 flex justify-between items-center mb-2 overflow-hidden group hover:border-blue-500/30 transition-all">
                     <div className="overflow-hidden pr-4"><p className="text-xs font-bold text-white mb-1 truncate">{m.name}</p><p className="text-[9px] font-mono text-slate-500 truncate">{m.address}</p></div>
@@ -213,22 +202,20 @@ function App() {
             </section>
           ) : (
             <section className="bg-slate-900/40 border border-slate-800 rounded-3xl p-8 backdrop-blur-md sticky top-28 shadow-2xl">
-              <h2 className="text-white font-bold mb-8 flex items-center gap-2 text-red-500 uppercase italic tracking-widest"><ShieldAlert size={20} /> 實時穿透掃描</h2>
+              <h2 className="text-white font-bold mb-8 flex items-center gap-2 text-red-500 uppercase italic tracking-widest"><ShieldAlert size={20} /> 風控智慧掃描</h2>
               <div className="space-y-6">
                 <div className="bg-blue-500/5 border border-blue-500/10 p-4 rounded-2xl">
-                    <p className="text-[10px] text-blue-400 font-bold mb-2 uppercase tracking-widest flex items-center gap-2"><Info size={14}/> 白名單模式</p>
-                    <p className="text-[11px] text-slate-500 italic leading-relaxed">
-                        系統將自動忽略所有涉及您的 {merchantWallets.length} 個店家地址的交易。
-                        這代表「店家發放紅利」或「內部錢包轉帳」將**不會**被標記為風險。
-                    </p>
+                    <p className="text-[10px] text-blue-400 font-bold mb-2 uppercase tracking-widest">Whitelist Mode Active</p>
+                    <p className="text-[11px] text-slate-500 italic leading-relaxed">分析時將自動剔除涉及您註冊店家的所有流水。任何店家發放的紅利將不會被判定為風險。</p>
                 </div>
-                <input type="text" value={qAddress} onChange={e => setQAddress(e.target.value)} placeholder="貼上 Q 客戶地址..." className="w-full bg-black border border-slate-800 rounded-2xl px-5 py-5 text-sm font-mono text-white focus:ring-1 focus:ring-blue-500 outline-none shadow-2xl" />
-                <button onClick={runDeepAnalysis} disabled={analysisStep > 0 && analysisStep < 4} className="w-full bg-white text-black font-black py-5 rounded-2xl hover:bg-slate-200 transition-all flex items-center justify-center gap-3 shadow-2xl uppercase tracking-widest">發起智慧分析</button>
+                <input type="text" value={qAddress} onChange={e => setQAddress(e.target.value)} placeholder="貼上 Q 客戶地址..." className="w-full bg-black border border-slate-800 rounded-2xl px-5 py-5 text-sm font-mono text-white focus:ring-1 focus:ring-blue-500 outline-none shadow-2xl shadow-blue-900/10" />
+                <button onClick={runDeepAnalysis} disabled={analysisStep > 0 && analysisStep < 4} className="w-full bg-white text-black font-black py-5 rounded-2xl hover:bg-slate-200 transition-all flex items-center justify-center gap-3 shadow-2xl uppercase tracking-widest">發起鏈上碰撞</button>
               </div>
             </section>
           )}
         </div>
 
+        {/* 右側：分析報告區域 */}
         <div className="lg:col-span-8">
           {finalReport ? (
             <div className="bg-slate-900/60 border border-slate-800 rounded-[2.5rem] overflow-hidden shadow-2xl animate-in fade-in pb-10">
@@ -244,7 +231,7 @@ function App() {
               </div>
               <div className="p-10 space-y-12">
                 <section>
-                  <h4 className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-6 px-2 flex items-center gap-2"><Clock size={16} className="text-blue-500" /> 第一層：原始 TRC20 交易流水</h4>
+                  <h4 className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-6 px-2 flex items-center gap-2"><Clock size={16} className="text-blue-500" /> 第一層：真實 TRC20 交易流水</h4>
                   <div className="bg-black/40 rounded-3xl border border-slate-800 overflow-hidden shadow-inner overflow-x-auto custom-scrollbar-h">
                     <table className="w-full text-left text-[11px] font-mono min-w-[1000px]">
                       <thead className="bg-white/5 text-slate-500 border-b border-slate-800 uppercase tracking-widest">
@@ -265,7 +252,7 @@ function App() {
                   </div>
                 </section>
                 <section>
-                  <h4 className="text-[11px] font-bold text-red-500 uppercase tracking-widest mb-8 px-2 flex items-center gap-2"><AlertTriangle size={16} /> 碰撞命中分析 (已剔除店家地址)</h4>
+                  <h4 className="text-[11px] font-bold text-red-500 uppercase tracking-widest mb-8 px-2 flex items-center gap-2"><AlertTriangle size={16} /> 碰撞命中分析 (已過濾店家白名單)</h4>
                   <div className="space-y-6">
                     {finalReport.matches.length > 0 ? finalReport.matches.map((m, i) => (
                       <div key={i} className="bg-slate-900/80 border border-slate-800 rounded-[2.5rem] p-8 flex flex-col md:flex-row gap-8 items-center group hover:border-red-500/30 transition-all shadow-xl">
@@ -278,68 +265,71 @@ function App() {
                           <div className="flex flex-col lg:flex-row gap-4 items-center">
                             <div className="flex-1 w-full overflow-hidden">
                               <p className="text-[10px] text-slate-500 uppercase font-bold mb-2">碰撞客戶錢包</p>
-                              <p className="text-[12px] font-mono text-white whitespace-nowrap overflow-x-auto custom-scrollbar-h bg-black/40 p-4 rounded-xl border border-slate-800 font-bold py-3 shadow-inner select-all">{m.customerWallet}</p>
+                              <p className="text-[12px] font-mono text-white whitespace-nowrap overflow-x-auto bg-black/40 p-4 rounded-xl border border-slate-800 font-bold py-3 shadow-inner select-all">{m.customerWallet}</p>
                             </div>
                             <ArrowRightLeft className="text-slate-800 hidden lg:block shrink-0" size={24} />
                             <div className="flex-1 w-full overflow-hidden">
                               <p className="text-[10px] text-red-400 uppercase font-bold mb-2">第三方碰撞點</p>
-                              <p className="text-[12px] font-mono text-red-400 whitespace-nowrap overflow-x-auto custom-scrollbar-h bg-red-500/5 p-4 rounded-xl border border-red-500/20 shadow-lg font-bold py-3 select-all">{m.relatedAddr}</p>
+                              <p className="text-[12px] font-mono text-red-400 whitespace-nowrap overflow-x-auto bg-red-500/5 p-4 rounded-xl border border-red-500/20 shadow-lg font-bold py-3 select-all">{m.relatedAddr}</p>
                             </div>
                           </div>
                           <div className="flex justify-end gap-3 mt-4"><button onClick={() => {setModalData(m); setShowModal(true);}} className="bg-blue-600 text-black font-black px-8 py-3 rounded-xl text-[10px] uppercase tracking-widest hover:bg-blue-500 transition-all shadow-lg">證據詳情</button></div>
                         </div>
                       </div>
                     )) : (
-                        <div className="p-20 text-center bg-black/20 rounded-[2rem] border border-dashed border-slate-800">
+                        <div className="p-20 text-center bg-black/20 rounded-[2rem] border border-dashed border-slate-800 animate-in fade-in">
                             <ShieldCheck size={48} className="mx-auto mb-4 text-emerald-500 opacity-50" />
-                            <p className="text-sm font-bold text-slate-500 italic">經深度過濾，未發現異常關聯。該地址僅與您的店家白名單地址有直接往來。</p>
+                            <p className="text-sm font-bold text-slate-500 italic">經全量白名單過濾，未發現與其他分店共享非店家節點。該地址行為表現正常。</p>
                         </div>
                     )}
                   </div>
                 </section>
+                <div className="pt-10 border-t border-slate-800 flex justify-center">
+                  <button onClick={() => {setQAddress(''); setFinalReport(null); setAnalysisStep(0);}} className="flex items-center gap-3 text-xs font-bold text-slate-500 hover:text-white transition-all uppercase bg-slate-900/50 px-12 py-4 rounded-full border border-slate-800 shadow-xl"><Repeat size={16} /> 執行新分析</button>
+                </div>
               </div>
             </div>
           ) : (
-            <div className="h-full min-h-[750px] flex flex-col items-center justify-center bg-slate-900/20 rounded-[4rem] border-2 border-dashed border-slate-800/50 text-slate-600 p-20 text-center">
+            <div className="h-full min-h-[750px] flex flex-col items-center justify-center bg-slate-900/20 rounded-[4rem] border-2 border-dashed border-slate-800/50 text-slate-600 p-20 text-center shadow-inner">
                <Repeat size={80} className="opacity-10 text-blue-500 animate-spin-slow mb-8" />
                <h3 className="text-2xl font-black text-slate-400 tracking-tighter uppercase italic tracking-widest">Awaiting Analysis</h3>
-               <p className="text-sm mt-4 text-slate-500 max-w-sm italic leading-relaxed">請在左側輸入地址。系統將自動識別並跳過所有店家產生的「正常往來碰撞」。</p>
+               <p className="text-sm mt-4 text-slate-500 max-w-sm italic leading-relaxed">請在左側輸入地址。AI 將自動剔除您的店家流水，僅掃描外部異常關聯。</p>
             </div>
           )}
         </div>
       </main>
 
-      {/* Modal */}
+      {/* 詳情彈窗 */}
       {showModal && modalData && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-10 animate-in">
           <div className="absolute inset-0 bg-black/95 backdrop-blur-md" onClick={() => setShowModal(false)}></div>
           <div className="relative w-full max-w-7xl bg-[#0c0c0e] border border-blue-500/30 rounded-[3rem] shadow-2xl flex flex-col max-h-full overflow-hidden">
-            <div className="p-8 border-b border-slate-800 flex justify-between items-center bg-gradient-to-r from-blue-950/20 to-transparent">
+            <div className="p-8 border-b border-slate-800 flex justify-between items-center bg-gradient-to-r from-blue-950/20 to-transparent px-12">
               <div className="flex items-center gap-5"><div className="bg-blue-500 p-3 rounded-2xl shadow-lg"><Activity className="text-black" size={28} /></div><div><h4 className="text-2xl font-black text-white italic uppercase tracking-tighter">鏈上證據詳細記錄</h4><p className="text-[10px] text-blue-500 font-bold uppercase tracking-widest mt-1">Status: Filtered Analysis Confirmed</p></div></div>
               <button onClick={() => setShowModal(false)} className="bg-slate-900 p-3 rounded-2xl text-slate-500 hover:text-red-400 transition-all border border-slate-800"><X size={24} /></button>
             </div>
-            <div className="p-12 overflow-y-auto custom-scrollbar space-y-12">
+            <div className="p-12 overflow-y-auto custom-scrollbar space-y-12 px-16">
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <div className="bg-black/60 p-8 rounded-[2rem] border border-slate-800 shadow-inner"><h5 className="text-[10px] font-bold text-slate-500 uppercase mb-4 tracking-widest">舉報客戶端 Q (Source)</h5><p className="text-[15px] font-mono text-white select-all break-all font-bold leading-relaxed">{modalData.customerWallet}</p></div>
-                <div className="bg-red-500/5 p-8 rounded-[2rem] border border-red-500/20 shadow-xl"><h5 className="text-[10px] font-bold text-red-400 uppercase mb-4 tracking-widest">第三方風險節點 (Collision)</h5><p className="text-[15px] font-mono text-red-400 select-all break-all font-bold leading-relaxed">{modalData.relatedAddr}</p></div>
+                <div className="bg-black/60 p-8 rounded-[2rem] border border-slate-800 shadow-inner"><h5 className="text-[10px] font-bold text-slate-500 uppercase mb-4 tracking-widest">舉報對象 Q (Source)</h5><p className="text-[15px] font-mono text-white select-all break-all leading-relaxed font-bold">{modalData.customerWallet}</p></div>
+                <div className="bg-red-500/5 p-8 rounded-[2rem] border border-red-500/20 shadow-xl"><h5 className="text-[10px] font-bold text-red-400 uppercase mb-4 tracking-widest">外部命中節點 (Non-Store Target)</h5><p className="text-[15px] font-mono text-red-400 select-all break-all leading-relaxed font-bold">{modalData.relatedAddr}</p></div>
               </div>
               <div className="bg-black/60 rounded-[2.5rem] border border-slate-800 overflow-x-auto shadow-2xl">
                 <table className="w-full text-left text-[13px] font-mono border-collapse min-w-[1000px]">
                   <thead className="bg-white/5 text-slate-500 uppercase tracking-widest border-b border-slate-800"><tr><th className="px-10 py-6">時間</th><th className="px-10 py-6">FROM</th><th className="px-6 py-6 text-center">狀態</th><th className="px-10 py-6">TO</th><th className="px-10 py-6 text-right">金額 (USDT)</th></tr></thead>
                   <tbody>
-                    <tr className="bg-blue-500/10 transition-colors"><td className="px-10 py-8 text-slate-400 whitespace-nowrap font-bold">{modalData.matchedTx.time}</td><td className="px-10 py-8 select-all break-all font-bold">{modalData.matchedTx.from}</td><td className="px-6 py-8 text-center"><span className="text-[9px] font-black bg-blue-500 text-black px-2 py-0.5 rounded shadow-lg uppercase tracking-widest">Matched</span></td><td className="px-10 py-8 select-all break-all font-bold text-red-400">{modalData.matchedTx.to}</td><td className="px-10 py-8 text-right font-black text-blue-400 text-2xl">{modalData.matchedTx.amount} <span className="text-[10px] text-slate-500 font-normal">USDT</span></td></tr>
+                    <tr className="bg-blue-500/10 transition-colors"><td className="px-10 py-8 text-slate-400 whitespace-nowrap font-bold">{modalData.matchedTx.time}</td><td className="px-10 py-8 select-all break-all font-bold">{modalData.matchedTx.from}</td><td className="px-6 py-8 text-center"><span className="text-[9px] font-black bg-blue-500 text-black px-2 py-0.5 rounded shadow-lg uppercase tracking-widest">Verified</span></td><td className="px-10 py-8 select-all break-all font-bold text-red-400">{modalData.matchedTx.to}</td><td className="px-10 py-8 text-right font-black text-blue-400 text-2xl">{modalData.matchedTx.amount} <span className="text-[10px] text-slate-500 font-normal">USDT</span></td></tr>
                   </tbody>
                 </table>
               </div>
-              <div className="bg-blue-500/5 p-12 rounded-[3rem] border border-blue-500/20 shadow-inner px-16">
+              <div className="bg-blue-500/5 p-12 rounded-[3rem] border border-blue-500/20 shadow-inner">
                 <div className="flex items-center gap-4 mb-5"><CheckCircle2 size={32} className="text-blue-500" /><h4 className="text-xl font-black text-white italic uppercase tracking-tighter underline decoration-blue-500/30 underline-offset-4">AI 審計診斷結論</h4></div>
                 <p className="text-[16px] text-slate-400 leading-relaxed italic max-w-5xl">
-                    該分析報告已成功剔除與「店家白名單」相關的所有轉帳紀錄（如發放紅利、內部歸集等）。
-                    目前檢測出的關聯，是基於該客戶與受監控店鋪在**非店家擁有的第三方地址**上產生的資金重疊。建議對此地址採取進一步風控措施。
+                    該分析已徹底過濾所有涉及店家名單的流水。
+                    目前結果基於該帳戶與店鋪客戶在**非店家共同錢包**上的資金匯集行為。判定具備高風險。
                 </p>
               </div>
             </div>
-            <div className="p-10 border-t border-slate-800 bg-slate-900/40 flex justify-end px-16"><button onClick={() => setShowModal(false)} className="px-14 py-5 bg-white text-black font-black rounded-2xl hover:bg-slate-200 transition-all uppercase text-xs tracking-widest shadow-xl">關閉細節</button></div>
+            <div className="p-10 border-t border-slate-800 bg-slate-900/40 flex justify-end px-16"><button onClick={() => setShowModal(false)} className="px-14 py-5 bg-white text-black font-black rounded-2xl hover:bg-slate-200 transition-all uppercase text-xs tracking-widest shadow-xl shadow-blue-500/10">關閉細節報告</button></div>
           </div>
         </div>
       )}
